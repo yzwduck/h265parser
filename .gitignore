@@ -1,0 +1,7 @@
+Debug
+Release
+/Released
+*.aps
+/*.suo
+/*.sdf
+/*.opensdf
