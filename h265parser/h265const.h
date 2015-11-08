@@ -22,6 +22,7 @@ enum H265NalType {
   H265_NAL_TYPE_IDR_W_RADL = 19,
   H265_NAL_TYPE_IDR_N_LP = 20,
   H265_NAL_TYPE_CRA_NUT = 21,
+  H265_NAL_TYPE_RSV_IRAP_VCL23 = 23,
   H265_NAL_TYPE_VPS_NUT = 32,
   H265_NAL_TYPE_SPS_NUT = 33,
   H265_NAL_TYPE_PPS_NUT = 34,
@@ -35,7 +36,7 @@ enum H265NalType {
 
 const char *GetH265NalType(enum H265NalType val);
 
-enum H265SampleRatio{
+enum H265SampleRatio {
   H265_SAMPLE_RATIO_UNSPECIFIED = 0,
   H265_SAMPLE_RATIO_1_1 = 1,
   H265_SAMPLE_RATIO_12_11 = 2,
@@ -54,6 +55,12 @@ enum H265SampleRatio{
   H265_SAMPLE_RATIO_3_2 = 15,
   H265_SAMPLE_RATIO_2_1 = 16,
   EXTENDED_SAR = 255
+};
+
+enum H265SliceType {
+  H265_SLICE_TYPE_B = 0,
+  H265_SLICE_TYPE_P = 1,
+  H265_SLICE_TYPE_I = 2
 };
 
 #endif

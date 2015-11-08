@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include "bitstream.h"
 #include "h265const.h"
 #include "output-context.h"
@@ -12,7 +13,44 @@ struct h265_decode_t {
   struct H265VideoParameterSet video_param_set;
   struct H265SeqParameterSet seq_param_set;
   struct H265PicParameterSet pic_param_set;
+  struct H265SliceSegmentLayer slice_segment;
 };
+
+int CeilLog2(uint64_t value) {
+  // http://stackoverflow.com/a/3391294
+  if (!value) {
+    return -1; // no bits set
+  }
+  int pos = 0;
+  if (value & (value - 1ULL)) {
+    pos = 1;
+  }
+  if (value & 0xFFFFFFFF00000000ULL) {
+    pos += 32;
+    value = value >> 32;
+  }
+  if (value & 0x00000000FFFF0000ULL) {
+    pos += 16;
+    value = value >> 16;
+  }
+  if (value & 0x000000000000FF00ULL) {
+    pos += 8;
+    value = value >> 8;
+  }
+  if (value & 0x00000000000000F0ULL) {
+    pos += 4;
+    value = value >> 4;
+  }
+  if (value & 0x000000000000000CULL) {
+    pos += 2;
+    value = value >> 2;
+  }
+  if (value & 0x0000000000000002ULL) {
+    pos += 1;
+    value = value >> 1;
+  }
+  return pos;
+}
 
 uint32_t h265_find_next_start_code(uint8_t *pBuf, uint32_t bufLen) {
   uint32_t val;
@@ -496,6 +534,10 @@ int h265_seq_parameter_set(struct h265_decode_t *dec, struct BitStream *bs,
     out->put_uint(out, "separate_colour_plane_flag",
                   sps->separate_colour_plane_flag = BsGet(bs, 1));
   }
+  out->put_uint(out, "ChromaArrayType",
+                sps->ChromaArrayType = (sps->separate_colour_plane_flag == 0)
+                                           ? sps->chroma_format_idc
+                                           : 0);
   out->put_uint(out, "pic_width_in_luma_samples",
                 sps->pic_width_in_luma_samples = BsUe(bs));
   out->put_uint(out, "pic_height_in_luma_samples",
@@ -568,10 +610,10 @@ int h265_seq_parameter_set(struct h265_decode_t *dec, struct BitStream *bs,
     out->put_uint(out, "pcm_loop_filter_disabled_flag",
                   sps->pcm_loop_filter_disabled_flag = BsGet(bs, 1));
   }
-  dec->seq_param_set.num_short_term_ref_pic_sets = BsUe(bs);
+  sps->num_short_term_ref_pic_sets = BsUe(bs);
   out->put_uint(out, "num_short_term_ref_pic_sets",
-                dec->seq_param_set.num_short_term_ref_pic_sets);
-  for (i = 0; i < dec->seq_param_set.num_short_term_ref_pic_sets; i++) {
+                sps->num_short_term_ref_pic_sets);
+  for (i = 0; i < sps->num_short_term_ref_pic_sets; i++) {
     // TODO: phrase st_ref_pic_set
     // st_ref_pic_set(i);
   }
@@ -581,8 +623,8 @@ int h265_seq_parameter_set(struct h265_decode_t *dec, struct BitStream *bs,
     out->put_uint(out, "num_long_term_ref_pics_sps",
                   sps->num_long_term_ref_pics_sps = BsUe(bs));
     for (i = 0; i < sps->num_long_term_ref_pics_sps; i++) {
-      // typo in section 7.3.2.2.1  'u(v)'
-      uint8_t lt_ref_pic_poc_lsb_sps = BsUe(bs);
+      uint32_t lt_ref_pic_poc_lsb_sps =
+          BsGet(bs, sps->log2_max_pic_order_cnt_lsb_minus4 + 4);
       uint8_t used_by_curr_pic_lt_sps_flag = BsGet(bs, 1);
     }
   }
@@ -614,6 +656,67 @@ int h265_seq_parameter_set(struct h265_decode_t *dec, struct BitStream *bs,
           uint8_t sps_extension_data_flag = BsGet(bs, 1);
   rbsp_trailing_bits()
   */
+
+  // =======================
+  // P20, Table 6-1
+  if (sps->separate_colour_plane_flag == 0) {
+    switch (sps->chroma_format_idc) {
+    case 0:
+      sps->SubWidthC = 1;
+      sps->SubHeightC = 1;
+      break;
+    case 1:
+      sps->SubWidthC = 2;
+      sps->SubHeightC = 2;
+      break;
+    case 2:
+      sps->SubWidthC = 2;
+      sps->SubHeightC = 1;
+      break;
+    case 3:
+      sps->SubWidthC = 1;
+      sps->SubHeightC = 1;
+      break;
+    }
+  } else if (sps->separate_colour_plane_flag == 1 &&
+             sps->chroma_format_idc == 3) {
+    sps->SubWidthC = 1;
+    sps->SubHeightC = 1;
+  }
+  out->put_uint(out, "SubWidthC", sps->SubWidthC);
+  out->put_uint(out, "SubHeightC", sps->SubHeightC);
+
+  // P74, (7-10) ~ (7-22)
+  sps->MinCbLog2SizeY = sps->log2_min_luma_coding_block_size_minus3 + 3;
+  sps->CtbLog2SizeY =
+      sps->MinCbLog2SizeY + sps->log2_diff_max_min_luma_coding_block_size;
+  sps->MinCbSizeY = 1 << sps->MinCbLog2SizeY;
+  sps->CtbSizeY = 1 << sps->CtbLog2SizeY;
+  sps->PicWidthInMinCbsY = sps->pic_width_in_luma_samples / sps->MinCbSizeY;
+  sps->PicWidthInCtbsY =
+      (uint32_t)ceil(1.0 * sps->pic_width_in_luma_samples / sps->CtbSizeY);
+  sps->PicHeightInMinCbsY = sps->pic_height_in_luma_samples / sps->MinCbSizeY;
+  sps->PicHeightInCtbsY =
+      (uint32_t)ceil(1.0 * sps->pic_height_in_luma_samples / sps->CtbSizeY);
+  sps->PicSizeInMinCbsY = sps->PicWidthInMinCbsY * sps->PicHeightInMinCbsY;
+  sps->PicSizeInCtbsY = sps->PicWidthInCtbsY * sps->PicHeightInCtbsY;
+  sps->PicSizeInSamplesY =
+      sps->pic_width_in_luma_samples * sps->pic_height_in_luma_samples;
+  sps->PicWidthInSamplesC = sps->pic_width_in_luma_samples / sps->SubWidthC;
+  sps->PicHeightInSamplesC = sps->pic_height_in_luma_samples / sps->SubHeightC;
+  out->put_uint(out, "MinCbLog2SizeY", sps->MinCbLog2SizeY);
+  out->put_uint(out, "CtbLog2SizeY", sps->CtbLog2SizeY);
+  out->put_uint(out, "MinCbSizeY", sps->MinCbSizeY);
+  out->put_uint(out, "CtbSizeY", sps->CtbSizeY);
+  out->put_uint(out, "PicWidthInMinCbsY", sps->PicWidthInMinCbsY);
+  out->put_uint(out, "PicWidthInCtbsY", sps->PicWidthInCtbsY);
+  out->put_uint(out, "PicHeightInMinCbsY", sps->PicHeightInMinCbsY);
+  out->put_uint(out, "PicHeightInCtbsY", sps->PicHeightInCtbsY);
+  out->put_uint(out, "PicSizeInMinCbsY", sps->PicSizeInMinCbsY);
+  out->put_uint(out, "PicSizeInCtbsY", sps->PicSizeInCtbsY);
+  out->put_uint(out, "PicSizeInSamplesY", sps->PicSizeInSamplesY);
+  out->put_uint(out, "PicWidthInSamplesC", sps->PicWidthInSamplesC);
+  out->put_uint(out, "PicHeightInSamplesC", sps->PicHeightInSamplesC);
   return 0;
 }
 
@@ -689,6 +792,35 @@ int h265_video_parameter_set(struct h265_decode_t *dec, struct BitStream *bs,
   }
   out->put_uint(out, "vps_extension_flag",
                 vps->vps_extension_flag = BsGet(bs, 1));
+  return 0;
+}
+
+int h265_pps_range_extension(struct h265_decode_t *dec, struct BitStream *bs,
+                             struct OutputContextDict *out) {
+  uint32_t i;
+  struct H265PicParameterSet *pps = &dec->pic_param_set;
+  if (pps->transform_skip_enabled_flag) {
+    out->put_uint(out, "log2_max_transform_skip_block_size_minus2",
+                  pps->log2_max_transform_skip_block_size_minus2 = BsUe(bs));
+  }
+  out->put_uint(out, "cross_component_prediction_enabled_flag",
+                pps->cross_component_prediction_enabled_flag = BsGet(bs, 1));
+  out->put_uint(out, "chroma_qp_offset_list_enabled_flag",
+                pps->chroma_qp_offset_list_enabled_flag = BsGet(bs, 1));
+  if (pps->chroma_qp_offset_list_enabled_flag) {
+    out->put_uint(out, "diff_cu_chroma_qp_offset_depth",
+                  pps->diff_cu_chroma_qp_offset_depth = BsUe(bs));
+    out->put_uint(out, "chroma_qp_offset_list_len_minus1",
+                  pps->chroma_qp_offset_list_len_minus1 = BsUe(bs));
+    for (i = 0; i <= pps->chroma_qp_offset_list_len_minus1; i++) {
+      int32_t cb_qp_offset_list = BsSe(bs);
+      int32_t cr_qp_offset_list = BsSe(bs);
+    }
+  }
+  out->put_uint(out, "log2_sao_offset_scale_luma",
+                pps->log2_sao_offset_scale_luma = BsUe(bs));
+  out->put_uint(out, "log2_sao_offset_scale_chroma",
+                pps->log2_sao_offset_scale_chroma = BsUe(bs));
   return 0;
 }
 
@@ -795,9 +927,9 @@ int h265_pic_parameter_set(struct h265_decode_t *dec, struct BitStream *bs,
     out->put_uint(out, "pps_extension_6bits",
                   pps->pps_extension_6bits = BsGet(bs, 6));
   }
+  if (pps->pps_range_extension_flag)
+    h265_pps_range_extension(dec, bs, out);
   /*
-  if( pps_range_extension_flag )
-  pps_range_extension();
   if( pps_multilayer_extension_flag )
   pps_multilayer_extension();  // specified in Annex F
   if( pps_extension_6bits )
@@ -805,6 +937,209 @@ int h265_pic_parameter_set(struct h265_decode_t *dec, struct BitStream *bs,
   out->put_uint(out, "pps_extension_data_flag", pps->pps_extension_data_flag
   =BsGet(bs, 1));
   */
+  return 0;
+}
+
+int h265_slice_segment_header(struct h265_decode_t *dec, struct BitStream *bs,
+                              struct OutputContextDict *out) {
+  uint32_t i;
+  struct H265SliceSegmentHeader *ssh = &dec->slice_segment.header;
+  struct H265SeqParameterSet *sps = &dec->seq_param_set;
+  struct H265PicParameterSet *pps = &dec->pic_param_set;
+
+  uint8_t nal_unit_type = dec->nal_unit_header.nal_unit_type;
+
+  out->put_uint(out, "first_slice_segment_in_pic_flag",
+                ssh->first_slice_segment_in_pic_flag = BsGet(bs, 1));
+  if (nal_unit_type >= H265_NAL_TYPE_BLA_W_LP &&
+      nal_unit_type <= H265_NAL_TYPE_RSV_IRAP_VCL23) {
+    out->put_uint(out, "no_output_of_prior_pics_flag",
+                  ssh->no_output_of_prior_pics_flag = BsGet(bs, 1));
+  }
+  out->put_uint(out, "slice_pic_parameter_set_id",
+                ssh->slice_pic_parameter_set_id = BsUe(bs));
+  if (!ssh->first_slice_segment_in_pic_flag) {
+    if (dec->pic_param_set.dependent_slice_segments_enabled_flag) {
+      out->put_uint(out, "dependent_slice_segment_flag",
+                    ssh->dependent_slice_segment_flag = BsGet(bs, 1));
+    }
+    out->put_uint(out, "slice_segment_address",
+                  ssh->slice_segment_address =
+                      BsGet(bs, CeilLog2(sps->PicSizeInCtbsY)));
+  }
+  if (!ssh->dependent_slice_segment_flag) {
+    for (i = 0; i < pps->num_extra_slice_header_bits; i++) {
+      uint8_t slice_reserved_flag = BsGet(bs, 1);
+    }
+    out->put_uint(out, "slice_type", ssh->slice_type = BsUe(bs));
+    if (pps->output_flag_present_flag) {
+      out->put_uint(out, "pic_output_flag",
+                    ssh->pic_output_flag = BsGet(bs, 1));
+    }
+    if (sps->separate_colour_plane_flag == 1) {
+      out->put_uint(out, "colour_plane_id",
+                    ssh->colour_plane_id = BsGet(bs, 2));
+    }
+    if (nal_unit_type != H265_NAL_TYPE_IDR_W_RADL &&
+        nal_unit_type != H265_NAL_TYPE_IDR_N_LP) {
+      out->put_uint(out, "slice_pic_order_cnt_lsb",
+                    ssh->slice_pic_order_cnt_lsb =
+                        BsGet(bs, sps->log2_max_pic_order_cnt_lsb_minus4 + 4));
+      out->put_uint(out, "short_term_ref_pic_set_sps_flag",
+                    ssh->short_term_ref_pic_set_sps_flag = BsGet(bs, 1));
+      if (!ssh->short_term_ref_pic_set_sps_flag) {
+        fprintf(stderr, "Unimplement st_ref_pic_set\n");
+        return -2;
+        // st_ref_pic_set(sps->num_short_term_ref_pic_sets);
+      } else if (sps->num_short_term_ref_pic_sets > 1) {
+        out->put_uint(out, "short_term_ref_pic_set_idx",
+                      ssh->short_term_ref_pic_set_idx = BsGet(
+                          bs, CeilLog2(sps->num_short_term_ref_pic_sets)));
+      }
+      if (sps->long_term_ref_pics_present_flag) {
+        if (sps->num_long_term_ref_pics_sps > 0) {
+          out->put_uint(out, "num_long_term_sps",
+                        ssh->num_long_term_sps = BsUe(bs));
+        }
+        out->put_uint(out, "num_long_term_pics",
+                      ssh->num_long_term_pics = BsUe(bs));
+        for (i = 0; i < ssh->num_long_term_sps + ssh->num_long_term_pics; i++) {
+          if (i < ssh->num_long_term_sps) {
+            if (sps->num_long_term_ref_pics_sps > 1) {
+              uint8_t lt_idx_sps =
+                  BsGet(bs, CeilLog2(sps->num_long_term_ref_pics_sps));
+            }
+          } else {
+            uint8_t poc_lsb_lt =
+                BsGet(bs, sps->log2_max_pic_order_cnt_lsb_minus4 + 4);
+            uint8_t used_by_curr_pic_lt_flag = BsGet(bs, 1);
+          }
+          uint8_t delta_poc_msb_present_flag = BsGet(bs, 1);
+          if (delta_poc_msb_present_flag) {
+            uint32_t delta_poc_msb_cycle_lt = BsUe(bs);
+          }
+        }
+      }
+      if (sps->sps_temporal_mvp_enabled_flag) {
+        out->put_uint(out, "slice_temporal_mvp_enabled_flag",
+                      ssh->slice_temporal_mvp_enabled_flag = BsGet(bs, 1));
+      }
+
+      // ===================
+    }
+    if (sps->sample_adaptive_offset_enabled_flag) {
+      out->put_uint(out, "slice_sao_luma_flag",
+                    ssh->slice_sao_luma_flag = BsGet(bs, 1));
+      if (sps->ChromaArrayType != 0) {
+        out->put_uint(out, "slice_sao_chroma_flag",
+                      ssh->slice_sao_chroma_flag = BsGet(bs, 1));
+      }
+    }
+    if (ssh->slice_type == H265_SLICE_TYPE_P ||
+        ssh->slice_type == H265_SLICE_TYPE_B) {
+      out->put_uint(out, "num_ref_idx_active_override_flag",
+                    ssh->num_ref_idx_active_override_flag = BsGet(bs, 1));
+      if (ssh->num_ref_idx_active_override_flag) {
+        out->put_uint(out, "num_ref_idx_l0_active_minus1",
+                      ssh->num_ref_idx_l0_active_minus1 = BsUe(bs));
+        if (ssh->slice_type == H265_SLICE_TYPE_B) {
+          out->put_uint(out, "num_ref_idx_l1_active_minus1",
+                        ssh->num_ref_idx_l1_active_minus1 = BsUe(bs));
+        }
+      }
+      fprintf(stderr, "Unimplemented ref_pic_lists_modification()\n");
+      return -2;
+      /*
+      if (pps->lists_modification_present_flag && NumPicTotalCurr > 1) {
+        ref_pic_lists_modification();
+      }
+      */
+      if (ssh->slice_type == H265_SLICE_TYPE_B) {
+        out->put_uint(out, "mvd_l1_zero_flag",
+                      ssh->mvd_l1_zero_flag = BsGet(bs, 1));
+      }
+      if (pps->cabac_init_present_flag) {
+        out->put_uint(out, "cabac_init_flag",
+                      ssh->cabac_init_flag = BsGet(bs, 1));
+      }
+      if (ssh->slice_temporal_mvp_enabled_flag) {
+        if (ssh->slice_type == H265_SLICE_TYPE_B) {
+          out->put_uint(out, "collocated_from_l0_flag",
+                        ssh->collocated_from_l0_flag = BsGet(bs, 1));
+        }
+        if ((ssh->collocated_from_l0_flag &&
+             ssh->num_ref_idx_l0_active_minus1 > 0) ||
+            (!ssh->collocated_from_l0_flag &&
+             ssh->num_ref_idx_l1_active_minus1 > 0)) {
+          out->put_uint(out, "collocated_ref_idx",
+                        ssh->collocated_ref_idx = BsUe(bs));
+        }
+      }
+      if ((pps->weighted_pred_flag && ssh->slice_type == H265_SLICE_TYPE_P) ||
+          (pps->weighted_bipred_flag && ssh->slice_type == H265_SLICE_TYPE_B)) {
+        fprintf(stderr, "Unimplemented pred_weight_table()\n");
+        return -2;
+        // pred_weight_table();
+      }
+      out->put_uint(out, "five_minus_max_num_merge_cand",
+                    ssh->five_minus_max_num_merge_cand = BsUe(bs));
+    }
+    out->put_int(out, "slice_qp_delta", ssh->slice_qp_delta = BsSe(bs));
+    if (pps->pps_slice_chroma_qp_offsets_present_flag) {
+      out->put_int(out, "slice_cb_qp_offset",
+                   ssh->slice_cb_qp_offset = BsSe(bs));
+      out->put_int(out, "slice_cr_qp_offset",
+                   ssh->slice_cr_qp_offset = BsSe(bs));
+    }
+    if (pps->chroma_qp_offset_list_enabled_flag) {
+      out->put_uint(out, "cu_chroma_qp_offset_enabled_flag",
+                    ssh->cu_chroma_qp_offset_enabled_flag = BsGet(bs, 1));
+    }
+    if (pps->deblocking_filter_override_enabled_flag) {
+      out->put_uint(out, "deblocking_filter_override_flag",
+                    ssh->deblocking_filter_override_flag = BsGet(bs, 1));
+    }
+    if (ssh->deblocking_filter_override_flag) {
+      out->put_uint(out, "slice_deblocking_filter_disabled_flag",
+                    ssh->slice_deblocking_filter_disabled_flag = BsGet(bs, 1));
+      if (!ssh->slice_deblocking_filter_disabled_flag) {
+        out->put_int(out, "slice_beta_offset_div2",
+                     ssh->slice_beta_offset_div2 = BsSe(bs));
+        out->put_int(out, "slice_tc_offset_div2",
+                     ssh->slice_tc_offset_div2 = BsSe(bs));
+      }
+    }
+
+    // =======================
+
+    if (pps->pps_loop_filter_across_slices_enabled_flag &&
+        (ssh->slice_sao_luma_flag || ssh->slice_sao_chroma_flag ||
+         !ssh->slice_deblocking_filter_disabled_flag)) {
+      out->put_uint(out, "slice_loop_filter_across_slices_enabled_flag",
+                    ssh->slice_loop_filter_across_slices_enabled_flag =
+                        BsGet(bs, 1));
+    }
+  }
+  if (pps->tiles_enabled_flag || pps->entropy_coding_sync_enabled_flag) {
+    out->put_uint(out, "num_entry_point_offsets",
+                  ssh->num_entry_point_offsets = BsUe(bs));
+    if (ssh->num_entry_point_offsets > 0) {
+      out->put_uint(out, "offset_len_minus1",
+                    ssh->offset_len_minus1 = BsUe(bs));
+      for (i = 0; i < ssh->num_entry_point_offsets; i++) {
+        uint8_t entry_point_offset_minus1 =
+            BsGet(bs, ssh->offset_len_minus1 + 1);
+      }
+    }
+  }
+  if (pps->slice_segment_header_extension_present_flag) {
+    out->put_uint(out, "slice_segment_header_extension_length",
+                  ssh->slice_segment_header_extension_length = BsUe(bs));
+    for (i = 0; i < ssh->slice_segment_header_extension_length; i++) {
+      uint8_t slice_segment_header_extension_data_byte = BsGet(bs, 8);
+    }
+  }
+  // byte_alignment();
   return 0;
 }
 
@@ -827,6 +1162,24 @@ int h265_parse_nal(struct h265_decode_t *dec, struct BitStream *bs,
       break;
     case H265_NAL_TYPE_PPS_NUT:
       h265_pic_parameter_set(dec, bs, out);
+      break;
+    case H265_NAL_TYPE_TRAIL_N:
+    case H265_NAL_TYPE_TRAIL_R:
+    case H265_NAL_TYPE_TSA_N:
+    case H265_NAL_TYPE_TSA_R:
+    case H265_NAL_TYPE_STSA_N:
+    case H265_NAL_TYPE_STSA_R:
+    case H265_NAL_TYPE_RADL_N:
+    case H265_NAL_TYPE_RADL_R:
+    case H265_NAL_TYPE_RASL_N:
+    case H265_NAL_TYPE_RASL_R:
+    case H265_NAL_TYPE_BLA_W_LP:
+    case H265_NAL_TYPE_BLA_W_RADL:
+    case H265_NAL_TYPE_BLA_N_LP:
+    case H265_NAL_TYPE_IDR_W_RADL:
+    case H265_NAL_TYPE_IDR_N_LP:
+    case H265_NAL_TYPE_CRA_NUT:
+      h265_slice_segment_header(dec, bs, out);
       break;
     }
   }

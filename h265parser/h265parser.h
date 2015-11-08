@@ -71,6 +71,15 @@ struct H265PicParameterSet {
   uint8_t pps_multilayer_extension_flag;
   uint8_t pps_extension_6bits;
   uint8_t pps_extension_data_flag;
+
+  // pps_range_extension
+  uint32_t log2_max_transform_skip_block_size_minus2;
+  uint8_t cross_component_prediction_enabled_flag;
+  uint8_t chroma_qp_offset_list_enabled_flag;
+  uint32_t diff_cu_chroma_qp_offset_depth;
+  uint32_t chroma_qp_offset_list_len_minus1;
+  uint32_t log2_sao_offset_scale_luma;
+  uint32_t log2_sao_offset_scale_chroma;
 };
 
 struct H265HrdParameters {
@@ -179,6 +188,29 @@ struct H265SeqParameterSet {
   uint32_t vui_parameters_present_flag;
   uint32_t sps_extension_present_flag;
   struct H265VuiParameters vui_param;
+
+  // variables
+  // P73
+  uint8_t ChromaArrayType;
+
+  // P20 Table 6-1
+  uint8_t SubWidthC;
+  uint8_t SubHeightC;
+
+  // P74, (7-10) ~ (7-22)
+  uint32_t MinCbLog2SizeY;
+  uint32_t CtbLog2SizeY;
+  uint32_t MinCbSizeY;
+  uint32_t CtbSizeY;
+  uint32_t PicWidthInMinCbsY;
+  uint32_t PicWidthInCtbsY;
+  uint32_t PicHeightInMinCbsY;
+  uint32_t PicHeightInCtbsY;
+  uint32_t PicSizeInMinCbsY;
+  uint32_t PicSizeInCtbsY;
+  uint32_t PicSizeInSamplesY;
+  uint32_t PicWidthInSamplesC;
+  uint32_t PicHeightInSamplesC;
 };
 
 struct H265ProfileTierLevelSubLayer {
@@ -204,4 +236,48 @@ struct H265ProfileTierLevelSubLayer {
   uint8_t inbld_flag;
   uint8_t level_idc;
 };
+
+struct H265SliceSegmentHeader {
+  uint8_t first_slice_segment_in_pic_flag;
+  uint8_t no_output_of_prior_pics_flag;
+  uint32_t slice_pic_parameter_set_id;
+  uint8_t dependent_slice_segment_flag;
+  uint8_t slice_segment_address;
+  uint32_t slice_type;
+  uint8_t pic_output_flag;
+  uint8_t colour_plane_id;
+  uint8_t slice_pic_order_cnt_lsb;
+  uint8_t short_term_ref_pic_set_sps_flag;
+  uint8_t short_term_ref_pic_set_idx;
+  uint32_t num_long_term_sps;
+  uint32_t num_long_term_pics;
+  uint8_t slice_temporal_mvp_enabled_flag;
+  uint8_t slice_sao_luma_flag;
+  uint8_t slice_sao_chroma_flag;
+  uint8_t num_ref_idx_active_override_flag;
+  uint32_t num_ref_idx_l0_active_minus1;
+  uint32_t num_ref_idx_l1_active_minus1;
+  uint8_t mvd_l1_zero_flag;
+  uint8_t cabac_init_flag;
+  uint8_t collocated_from_l0_flag;
+  uint32_t collocated_ref_idx;
+  uint32_t five_minus_max_num_merge_cand;
+  int32_t slice_qp_delta;
+  int32_t slice_cb_qp_offset;
+  int32_t slice_cr_qp_offset;
+  uint8_t cu_chroma_qp_offset_enabled_flag;
+  uint8_t deblocking_filter_override_flag;
+  uint8_t slice_deblocking_filter_disabled_flag;
+  int32_t slice_beta_offset_div2;
+  int32_t slice_tc_offset_div2;
+  uint8_t slice_loop_filter_across_slices_enabled_flag;
+  uint32_t num_entry_point_offsets;
+  uint32_t offset_len_minus1;
+  uint32_t slice_segment_header_extension_length;
+};
+
+struct H265SliceSegmentLayer {
+  struct H265SliceSegmentHeader header;
+};
+
 #endif
